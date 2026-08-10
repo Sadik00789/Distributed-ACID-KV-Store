@@ -1,0 +1,7 @@
+[build]
+rustflags = ["-C", "target-cpu=native", "-W", "rust-2018-idioms"]
+
+[alias]
+sim-test = "test --package kv-simulation --tests -- --nocapture"
+bench-p99 = "bench --package kv-node --bench p99_latency"
+check-all = "clippy --workspace --all-targets -- -D warnings"

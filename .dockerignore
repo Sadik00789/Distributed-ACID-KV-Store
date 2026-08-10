@@ -1,0 +1,10 @@
+target/
+.git/
+.cargo/
+*.log
+*.db
+data/
+node-data-*/
+README.md
+Dockerfile
+docker-compose.yml

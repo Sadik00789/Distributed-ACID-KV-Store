@@ -1,0 +1,12 @@
+[package]
+name = "client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+proto = { path = "../proto" }
+tokio = { workspace = true }
+tonic = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+clap = { version = "4.5", features = ["derive"] }

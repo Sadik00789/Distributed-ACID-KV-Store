@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  node-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["/app/kv-node", "--config", "/app/config/node-1.toml"]
+    ports:
+      - "50051:50051"
+      - "60051:60051"
+    volumes:
+      - node1_data:/app/data
+
+  node-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["/app/kv-node", "--config", "/app/config/node-2.toml"]
+    ports:
+      - "50052:50052"
+      - "60052:60052"
+    volumes:
+      - node2_data:/app/data
+
+  node-3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["/app/kv-node", "--config", "/app/config/node-3.toml"]
+    ports:
+      - "50053:50053"
+      - "60053:60053"
+    volumes:
+      - node3_data:/app/data
+
+volumes:
+  node1_data:
+  node2_data:
+  node3_data:

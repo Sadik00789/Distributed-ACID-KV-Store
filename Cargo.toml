@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/proto",
+    "crates/storage",
+    "crates/raft-engine",
+    "crates/txn-coordinator",
+    "crates/node",
+    "crates/client",
+    "crates/simulation",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+# Async Runtime & Networking
+tokio = { version = "1", features = ["full"] }
+tonic = "0.12"
+prost = "0.13"
+
+# Core Engines & Storage
+rocksdb = { version = "0.23", features = ["snappy"] }
+raft = "0.7"
+
+# Concurrency & Memory Allocation
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+bytes = "1"
+
+# Observability & Error Handling
+tracing = "0.1"
+tracing-subscriber = "0.3"
+thiserror = "2"
+anyhow = "1"
+
+# Testing & Deterministic Simulation
+madsim = "0.2"

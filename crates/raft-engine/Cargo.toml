@@ -1,0 +1,15 @@
+[package]
+name = "raft-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+proto = { path = "../proto" }
+storage = { path = "../storage" }
+raft = "0.7"
+slog = "2.7"
+tonic = { workspace = true }
+prost = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

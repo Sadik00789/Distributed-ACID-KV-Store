@@ -1,0 +1,101 @@
+syntax = "proto3";
+package txn;
+
+service TxnService {
+  rpc Prewrite (PrewriteRequest) returns (PrewriteResponse);
+  rpc Commit (CommitRequest) returns (CommitResponse);
+  rpc Rollback (RollbackRequest) returns (RollbackResponse);
+  rpc CheckTxnStatus (CheckTxnStatusRequest) returns (CheckTxnStatusResponse);
+  rpc HeartBeat (TxnHeartBeatRequest) returns (TxnHeartBeatResponse);
+}
+
+message Mutation {
+  enum Op {
+    PUT = 0;
+    DELETE = 1;
+  }
+  Op op = 1;
+  bytes key = 2;
+  bytes value = 3;
+}
+
+message Locked {
+  bytes key = 1;
+  bytes primary_lock = 2;
+  uint64 lock_version = 3;
+  uint64 lock_ttl = 4;
+}
+
+message WriteConflict {
+  bytes key = 1;
+  uint64 conflict_ts = 2;
+  uint64 current_ts = 3;
+}
+
+message KeyError {
+  oneof error {
+    Locked locked = 1;
+    WriteConflict conflict = 2;
+  }
+}
+
+message PrewriteRequest {
+  repeated Mutation mutations = 1;
+  bytes primary_lock = 2;
+  uint64 start_ts = 3;
+  uint64 lock_ttl = 4;
+}
+
+message PrewriteResponse {
+  repeated KeyError errors = 1;
+}
+
+message CommitRequest {
+  repeated bytes keys = 1;
+  uint64 start_ts = 2;
+  uint64 commit_ts = 3;
+}
+
+message CommitResponse {
+  KeyError error = 1;
+}
+
+message RollbackRequest {
+  repeated bytes keys = 1;
+  uint64 start_ts = 2;
+}
+
+message RollbackResponse {
+  KeyError error = 1;
+}
+
+message CheckTxnStatusRequest {
+  bytes primary_key = 1;
+  uint64 lock_ts = 2;
+  uint64 caller_start_ts = 3;
+}
+
+enum TxnAction {
+  NO_ACTION = 0;
+  ROLLED_BACK = 1;
+  COMMITTED = 2;
+}
+
+message CheckTxnStatusResponse {
+  uint64 lock_ttl = 1;
+  uint64 commit_ts = 2;
+  bool is_rolled_back = 3;
+  string error = 4;
+}
+
+message TxnHeartBeatRequest {
+  uint64 start_ts = 1;
+  bytes primary_lock = 2;
+  uint64 ttl = 3;
+}
+
+message TxnHeartBeatResponse {
+  bool success = 1;
+  uint64 ttl = 2;
+  string error = 3;
+}

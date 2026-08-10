@@ -1,0 +1,16 @@
+[package]
+name = "txn-coordinator"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+proto = { path = "../proto" }
+storage = { path = "../storage" }
+raft-engine = { path = "../raft-engine" }
+fjall = "2.11.2"
+tokio = { workspace = true }
+tonic = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }

@@ -1,0 +1,31 @@
+syntax = "proto3";
+package raft;
+
+service RaftService {
+  rpc SendMessage (RaftMessage) returns (RaftResponse);
+  rpc StreamSnapshot (stream SnapshotChunk) returns (SnapshotResponse);
+}
+
+message RaftMessage {
+  uint64 region_id = 1;
+  uint64 from_peer = 2;
+  uint64 to_peer = 3;
+  bytes message_data = 4; // Serialized eraftpb::Message byte stream
+}
+
+message RaftResponse {
+  bool accepted = 1;
+  string error = 2;
+}
+
+message SnapshotChunk {
+  uint64 region_id = 1;
+  uint64 snapshot_index = 2;
+  bytes data = 3;
+  bool is_last = 4;
+}
+
+message SnapshotResponse {
+  bool success = 1;
+  string error = 2;
+}

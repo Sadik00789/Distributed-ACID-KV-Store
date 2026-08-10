@@ -1,0 +1,18 @@
+node_id = 1
+grpc_addr = "127.0.0.1:50051"
+raft_addr = "127.0.0.1:60051"
+storage_path = "./data/node-1"
+peers = [
+    { node_id = 2, grpc_addr = "127.0.0.1:50052", raft_addr = "127.0.0.1:60052" },
+    { node_id = 3, grpc_addr = "127.0.0.1:50053", raft_addr = "127.0.0.1:60053" }
+]
+
+[raft]
+heartbeat_interval_ms = 100
+election_timeout_min_ms = 300
+election_timeout_max_ms = 600
+
+[storage]
+max_open_files = 500
+write_buffer_size_mb = 64
+region_split_size_mb = 64
