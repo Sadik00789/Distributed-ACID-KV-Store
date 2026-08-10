@@ -65,6 +65,6 @@ cargo test --workspace
 # Or directly run criterion benchmark:
 cargo bench -p simulation
 ```
-<img width="1920" height="1080" alt="Screenshot 2026-08-10 230142" src="https://github.com/user-attachments/assets/d7683bba-0b23-4885-892a-66d7283b6995" />
 <img width="1920" height="1080" alt="Screenshot 2026-08-10 230130" src="https://github.com/user-attachments/assets/50bd86e1-e9ae-41b4-84cd-1d377eeeabaf" />
+<img width="1920" height="1080" alt="Screenshot 2026-08-10 230142" src="https://github.com/user-attachments/assets/d7683bba-0b23-4885-892a-66d7283b6995" />
 
