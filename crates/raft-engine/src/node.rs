@@ -2,6 +2,7 @@ use crate::config::RaftConfig;
 use crate::store::RaftStorage;
 use raft::eraftpb::Message;
 use raft::{Config as RawRaftConfig, RawNode};
+use serde::{Deserialize, Serialize};
 use slog::{o, Discard, Logger};
 use storage::StorageEngine;
 use thiserror::Error;
@@ -11,6 +12,22 @@ use tracing::info;
 pub enum NodeError {
     #[error("Raft error: {0}")]
     Raft(#[from] raft::Error),
+    #[error("Raft storage error: {0}")]
+    RaftStorage(#[from] raft::StorageError),
+    #[error("Storage error: {0}")]
+    Storage(#[from] storage::StorageError),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RaftCmd {
+    SplitCmd {
+        region_id: u64,
+        split_key: Vec<u8>,
+        new_region_id: u64,
+    },
+    TxnCmd {
+        payload: Vec<u8>,
+    },
 }
 
 pub struct MultiRaftNode {
@@ -66,5 +83,40 @@ impl MultiRaftNode {
     pub fn propose(&mut self, data: Vec<u8>) -> Result<(), NodeError> {
         self.raw_node.propose(vec![], data)?;
         Ok(())
+    }
+
+    pub fn propose_cmd(&mut self, cmd: &RaftCmd) -> Result<(), NodeError> {
+        let data = serde_json::to_vec(cmd).unwrap_or_default();
+        self.propose(data)
+    }
+
+    /// Process Raft ready state: persists hard state/log entries, collects outgoing messages,
+    /// and returns committed payloads.
+    pub fn process_ready(&mut self) -> Result<(Vec<Message>, Vec<Vec<u8>>), NodeError> {
+        if !self.raw_node.has_ready() {
+            return Ok((vec![], vec![]));
+        }
+
+        let mut ready = self.raw_node.ready();
+
+        if !ready.entries().is_empty() {
+            self.storage.append(ready.entries())?;
+        }
+
+        if let Some(hs) = ready.hs() {
+            self.storage.set_hard_state(hs.clone());
+        }
+
+        let messages = ready.take_messages();
+        let mut committed_payloads = Vec::new();
+        for entry in ready.committed_entries().iter() {
+            if !entry.get_data().is_empty() {
+                committed_payloads.push(entry.get_data().to_vec());
+            }
+        }
+
+        self.raw_node.advance(ready);
+
+        Ok((messages, committed_payloads))
     }
 }

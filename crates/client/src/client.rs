@@ -1,10 +1,15 @@
 use proto::kv::kv_service_client::KvServiceClient as RawKvClient;
-use proto::kv::{GetRequest, ScanRequest};
+use proto::kv::{
+    AskSplitRequest, AskSplitResponse, BatchCommitRequest, BatchPrewriteRequest, GetRequest,
+    Mutation as KvMutation, ScanRequest,
+};
 use proto::txn::txn_service_client::TxnServiceClient as RawTxnClient;
 use proto::txn::{
-    CommitRequest, Mutation as ProtoMutation, PrewriteRequest, RollbackRequest, TxnHeartBeatRequest,
+    CommitRequest, Mutation as TxnMutation, PrewriteRequest, RollbackRequest, TxnHeartBeatRequest,
 };
+use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::{mpsc, oneshot};
 use tonic::transport::Channel;
 
 #[derive(Error, Debug)]
@@ -17,6 +22,164 @@ pub enum ClientError {
     Status(#[from] tonic::Status),
     #[error("Key not found")]
     NotFound,
+    #[error("Batch channel closed")]
+    ChannelClosed,
+    #[error("Region split error: {0}")]
+    SplitError(String),
+}
+
+struct PrewriteItem {
+    start_ts: u64,
+    mutations: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    primary_key: Vec<u8>,
+    lock_ttl: u64,
+    tx: oneshot::Sender<Result<(), ClientError>>,
+}
+
+struct CommitItem {
+    start_ts: u64,
+    commit_ts: u64,
+    keys: Vec<Vec<u8>>,
+    tx: oneshot::Sender<Result<(), ClientError>>,
+}
+
+#[derive(Clone)]
+pub struct BatchCollector {
+    prewrite_tx: mpsc::Sender<PrewriteItem>,
+    commit_tx: mpsc::Sender<CommitItem>,
+}
+
+impl BatchCollector {
+    pub fn new(client: KvClient, batch_size: usize, flush_interval_ms: u64) -> Self {
+        let (pw_tx, mut pw_rx) = mpsc::channel::<PrewriteItem>(1024);
+        let (cm_tx, mut cm_rx) = mpsc::channel::<CommitItem>(1024);
+
+        let mut client_pw = client.clone();
+        tokio::spawn(async move {
+            let interval = Duration::from_millis(flush_interval_ms);
+            loop {
+                let mut items = Vec::new();
+                let timeout = tokio::time::sleep(interval);
+                tokio::pin!(timeout);
+
+                loop {
+                    tokio::select! {
+                        item = pw_rx.recv() => {
+                            match item {
+                                Some(it) => {
+                                    items.push(it);
+                                    if items.len() >= batch_size {
+                                        break;
+                                    }
+                                }
+                                None => return,
+                            }
+                        }
+                        _ = &mut timeout => {
+                            break;
+                        }
+                    }
+                }
+
+                if !items.is_empty() {
+                    for item in items {
+                        let res = client_pw
+                            .batch_prewrite(
+                                item.start_ts,
+                                item.mutations,
+                                item.primary_key,
+                                item.lock_ttl,
+                            )
+                            .await;
+                        let _ = item.tx.send(res);
+                    }
+                }
+            }
+        });
+
+        let mut client_cm = client;
+        tokio::spawn(async move {
+            let interval = Duration::from_millis(flush_interval_ms);
+            loop {
+                let mut items = Vec::new();
+                let timeout = tokio::time::sleep(interval);
+                tokio::pin!(timeout);
+
+                loop {
+                    tokio::select! {
+                        item = cm_rx.recv() => {
+                            match item {
+                                Some(it) => {
+                                    items.push(it);
+                                    if items.len() >= batch_size {
+                                        break;
+                                    }
+                                }
+                                None => return,
+                            }
+                        }
+                        _ = &mut timeout => {
+                            break;
+                        }
+                    }
+                }
+
+                if !items.is_empty() {
+                    for item in items {
+                        let res = client_cm
+                            .batch_commit(item.start_ts, item.commit_ts, item.keys)
+                            .await;
+                        let _ = item.tx.send(res);
+                    }
+                }
+            }
+        });
+
+        Self {
+            prewrite_tx: pw_tx,
+            commit_tx: cm_tx,
+        }
+    }
+
+    pub async fn submit_prewrite(
+        &self,
+        start_ts: u64,
+        mutations: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+        primary_key: Vec<u8>,
+        lock_ttl: u64,
+    ) -> Result<(), ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.prewrite_tx
+            .send(PrewriteItem {
+                start_ts,
+                mutations,
+                primary_key,
+                lock_ttl,
+                tx,
+            })
+            .await
+            .map_err(|_| ClientError::ChannelClosed)?;
+        rx.await.map_err(|_| ClientError::ChannelClosed)?
+    }
+
+    pub async fn submit_commit(
+        &self,
+        start_ts: u64,
+        commit_ts: u64,
+        keys: Vec<Vec<u8>>,
+    ) -> Result<(), ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.commit_tx
+            .send(CommitItem {
+                start_ts,
+                commit_ts,
+                keys,
+                tx,
+            })
+            .await
+            .map_err(|_| ClientError::ChannelClosed)?;
+        rx.await.map_err(|_| ClientError::ChannelClosed)?
+    }
 }
 
 #[derive(Clone)]
@@ -100,12 +263,12 @@ impl KvClient {
         let proto_mutations = mutations
             .into_iter()
             .map(|(key, value)| match value {
-                Some(val) => ProtoMutation {
+                Some(val) => TxnMutation {
                     op: 0,
                     key,
                     value: val,
                 },
-                None => ProtoMutation {
+                None => TxnMutation {
                     op: 1,
                     key,
                     value: vec![],
@@ -139,6 +302,74 @@ impl KvClient {
             })
             .await?;
         Ok(())
+    }
+
+    pub async fn batch_prewrite(
+        &mut self,
+        start_ts: u64,
+        mutations: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+        primary_key: Vec<u8>,
+        lock_ttl: u64,
+    ) -> Result<(), ClientError> {
+        let proto_mutations = mutations
+            .into_iter()
+            .map(|(key, value)| match value {
+                Some(val) => KvMutation {
+                    op: 0,
+                    key,
+                    value: val,
+                },
+                None => KvMutation {
+                    op: 1,
+                    key,
+                    value: vec![],
+                },
+            })
+            .collect();
+
+        self.kv_inner
+            .batch_prewrite(BatchPrewriteRequest {
+                start_ts,
+                primary_lock: primary_key,
+                lock_ttl,
+                mutations: proto_mutations,
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn batch_commit(
+        &mut self,
+        start_ts: u64,
+        commit_ts: u64,
+        keys: Vec<Vec<u8>>,
+    ) -> Result<(), ClientError> {
+        self.kv_inner
+            .batch_commit(BatchCommitRequest {
+                start_ts,
+                commit_ts,
+                keys,
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn ask_split(
+        &mut self,
+        region_id: u64,
+        split_key: Vec<u8>,
+    ) -> Result<AskSplitResponse, ClientError> {
+        let res = self
+            .kv_inner
+            .ask_split(AskSplitRequest {
+                region_id,
+                split_key,
+            })
+            .await?
+            .into_inner();
+        Ok(res)
     }
 
     pub async fn txn_rollback(

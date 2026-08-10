@@ -1,17 +1,14 @@
 use parking_lot::RwLock;
+use protobuf::Message as PbMessage;
 use raft::eraftpb::{ConfState, Entry, HardState, Snapshot};
 use raft::{Error as RaftError, GetEntriesContext, RaftState, Storage, StorageError};
 use std::sync::Arc;
 use storage::StorageEngine;
 
-pub const PREFIX_RAFT_LOG: &[u8] = b"r_log_";
-pub const KEY_HARD_STATE: &[u8] = b"r_hard_state";
-pub const KEY_CONF_STATE: &[u8] = b"r_conf_state";
-
 #[derive(Clone)]
 pub struct RaftStorage {
-    _engine: StorageEngine,
-    _region_id: u64,
+    engine: StorageEngine,
+    region_id: u64,
     core: Arc<RwLock<RaftStorageCore>>,
 }
 
@@ -21,20 +18,63 @@ struct RaftStorageCore {
     entries: Vec<Entry>,
 }
 
+fn hs_key(region_id: u64) -> Vec<u8> {
+    format!("r_hs_{}", region_id).into_bytes()
+}
+
+fn cs_key(region_id: u64) -> Vec<u8> {
+    format!("r_cs_{}", region_id).into_bytes()
+}
+
+fn entry_key(region_id: u64, idx: u64) -> Vec<u8> {
+    format!("r_entry_{}_{:020}", region_id, idx).into_bytes()
+}
+
+fn entry_prefix(region_id: u64) -> Vec<u8> {
+    format!("r_entry_{}_", region_id).into_bytes()
+}
+
 impl RaftStorage {
     pub fn new(engine: StorageEngine, region_id: u64) -> Self {
+        let p_default = engine.default_partition();
+
+        let hard_state = match p_default.get(hs_key(region_id)) {
+            Ok(Some(bytes)) => HardState::parse_from_bytes(&bytes).unwrap_or_default(),
+            _ => HardState::default(),
+        };
+
+        let conf_state = match p_default.get(cs_key(region_id)) {
+            Ok(Some(bytes)) => ConfState::parse_from_bytes(&bytes).unwrap_or_default(),
+            _ => ConfState::default(),
+        };
+
         let mut entries = Vec::new();
-        let mut dummy = Entry::default();
-        dummy.set_index(0);
-        dummy.set_term(0);
-        entries.push(dummy);
+        let prefix = entry_prefix(region_id);
+
+        for item in p_default.range(prefix.clone()..) {
+            if let Ok((k, v)) = item {
+                if !k.starts_with(&prefix) {
+                    break;
+                }
+                if let Ok(entry) = Entry::parse_from_bytes(&v) {
+                    entries.push(entry);
+                }
+            }
+        }
+
+        if entries.is_empty() {
+            let mut dummy = Entry::default();
+            dummy.set_index(0);
+            dummy.set_term(0);
+            entries.push(dummy);
+        }
 
         Self {
-            _engine: engine,
-            _region_id: region_id,
+            engine,
+            region_id,
             core: Arc::new(RwLock::new(RaftStorageCore {
-                hard_state: HardState::default(),
-                conf_state: ConfState::default(),
+                hard_state,
+                conf_state,
                 entries,
             })),
         }
@@ -59,17 +99,39 @@ impl RaftStorage {
         }
 
         core.entries.extend_from_slice(entries);
+
+        let mut batch = self.engine.batch();
+        let p_default = self.engine.default_partition();
+        for entry in entries {
+            if let Ok(bytes) = entry.write_to_bytes() {
+                batch.insert(p_default, entry_key(self.region_id, entry.get_index()), bytes);
+            }
+        }
+        let _ = self.engine.commit_batch(batch);
+
         Ok(())
     }
 
     pub fn set_hard_state(&self, hs: HardState) {
         let mut core = self.core.write();
-        core.hard_state = hs;
+        core.hard_state = hs.clone();
+
+        if let Ok(bytes) = hs.write_to_bytes() {
+            let mut batch = self.engine.batch();
+            batch.insert(self.engine.default_partition(), hs_key(self.region_id), bytes);
+            let _ = self.engine.commit_batch(batch);
+        }
     }
 
     pub fn set_conf_state(&self, cs: ConfState) {
         let mut core = self.core.write();
-        core.conf_state = cs;
+        core.conf_state = cs.clone();
+
+        if let Ok(bytes) = cs.write_to_bytes() {
+            let mut batch = self.engine.batch();
+            batch.insert(self.engine.default_partition(), cs_key(self.region_id), bytes);
+            let _ = self.engine.commit_batch(batch);
+        }
     }
 }
 

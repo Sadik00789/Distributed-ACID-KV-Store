@@ -1,8 +1,11 @@
 use crate::server::NodeState;
+use protobuf::Message as PbMessage;
 use proto::kv::kv_service_server::KvService;
 use proto::kv::{
-    GetRequest as KvGetRequest, GetResponse as KvGetResponse, KeyValue, ScanRequest, ScanResponse,
-    TxnRequest, TxnResponse,
+    AskSplitRequest, AskSplitResponse, BatchCommitRequest, BatchCommitResponse,
+    BatchPrewriteRequest, BatchPrewriteResponse, GetRequest as KvGetRequest,
+    GetResponse as KvGetResponse, KeyValue, RegionStatsRequest, RegionStatsResponse,
+    ScanRequest, ScanResponse, TxnRequest, TxnResponse,
 };
 use proto::raft::raft_service_server::RaftService;
 use proto::raft::{RaftMessage, RaftResponse, SnapshotChunk, SnapshotResponse};
@@ -11,6 +14,8 @@ use proto::txn::{
     CheckTxnStatusRequest, CheckTxnStatusResponse, CommitRequest, CommitResponse, PrewriteRequest,
     PrewriteResponse, RollbackRequest, RollbackResponse, TxnHeartBeatRequest, TxnHeartBeatResponse,
 };
+use raft::eraftpb::Message as EraftMessage;
+use raft_engine::{MultiRaftNode, RaftConfig};
 use tonic::{Request, Response, Status};
 use txn_coordinator::{Mutation, TxnStatus};
 
@@ -30,8 +35,12 @@ impl KvService for KvServiceImpl {
     async fn get(&self, request: Request<KvGetRequest>) -> Result<Response<KvGetResponse>, Status> {
         let req = request.into_inner();
 
-        // Evaluates req.version for MVCC reads: version == 0 fetches latest HLC time,
-        // otherwise reads strictly at the specified transaction version/timestamp.
+        if let Ok(region) = self.node.router.route_key(&req.key) {
+            if !region.contains_key(&req.key) {
+                return Err(Status::out_of_range("ErrKeyNotInRegion"));
+            }
+        }
+
         let read_ts = if req.version == 0 {
             self.node.hlc.now()
         } else {
@@ -79,6 +88,171 @@ impl KvService for KvServiceImpl {
         Err(Status::unimplemented(
             "Direct multi-key transaction execution endpoint",
         ))
+    }
+
+    async fn batch_prewrite(
+        &self,
+        request: Request<BatchPrewriteRequest>,
+    ) -> Result<Response<BatchPrewriteResponse>, Status> {
+        let req = request.into_inner();
+        let mutations: Vec<Mutation> = req
+            .mutations
+            .into_iter()
+            .map(|m| {
+                if m.op == 1 {
+                    Mutation::Delete { key: m.key }
+                } else {
+                    Mutation::Put {
+                        key: m.key,
+                        value: m.value,
+                    }
+                }
+            })
+            .collect();
+
+        match self.node.coordinator.batch_prewrite(
+            req.start_ts,
+            &mutations,
+            &req.primary_lock,
+            req.lock_ttl,
+        ) {
+            Ok(_) => Ok(Response::new(BatchPrewriteResponse { errors: vec![] })),
+            Err(e) => Err(Status::aborted(e.to_string())),
+        }
+    }
+
+    async fn batch_commit(
+        &self,
+        request: Request<BatchCommitRequest>,
+    ) -> Result<Response<BatchCommitResponse>, Status> {
+        let req = request.into_inner();
+        match self
+            .node
+            .coordinator
+            .batch_commit(req.start_ts, req.commit_ts, &req.keys)
+        {
+            Ok(_) => Ok(Response::new(BatchCommitResponse { error: None })),
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+
+    async fn ask_split(
+        &self,
+        request: Request<AskSplitRequest>,
+    ) -> Result<Response<AskSplitResponse>, Status> {
+        let req = request.into_inner();
+        let region = match self.node.router.get_region(req.region_id) {
+            Some(r) => r,
+            None => {
+                return Ok(Response::new(AskSplitResponse {
+                    new_region_id: 0,
+                    left_start_key: vec![],
+                    left_end_key: vec![],
+                    right_start_key: vec![],
+                    right_end_key: vec![],
+                    error: format!("Region {} not found", req.region_id),
+                }));
+            }
+        };
+
+        let split_key = if !req.split_key.is_empty() {
+            req.split_key
+        } else {
+            match self
+                .node
+                .storage
+                .find_median_key(&region.start_key, &region.end_key)
+            {
+                Ok(Some(k)) => k,
+                _ => {
+                    return Ok(Response::new(AskSplitResponse {
+                        new_region_id: 0,
+                        left_start_key: vec![],
+                        left_end_key: vec![],
+                        right_start_key: vec![],
+                        right_end_key: vec![],
+                        error: "Could not find split key".to_string(),
+                    }));
+                }
+            }
+        };
+
+        let new_region_id = self.node.alloc_region_id();
+        match self
+            .node
+            .router
+            .split_region(req.region_id, split_key.clone(), new_region_id)
+        {
+            Ok((left, right)) => {
+                let raft_cfg = RaftConfig {
+                    node_id: self.node.config.node_id,
+                    ..Default::default()
+                };
+                if let Ok(new_node) = MultiRaftNode::new(
+                    new_region_id,
+                    vec![self.node.config.node_id],
+                    &raft_cfg,
+                    self.node.storage.clone(),
+                ) {
+                    self.node.raft_nodes.lock().insert(new_region_id, new_node);
+                }
+
+                Ok(Response::new(AskSplitResponse {
+                    new_region_id,
+                    left_start_key: left.start_key,
+                    left_end_key: left.end_key,
+                    right_start_key: right.start_key,
+                    right_end_key: right.end_key,
+                    error: String::new(),
+                }))
+            }
+            Err(e) => Ok(Response::new(AskSplitResponse {
+                new_region_id: 0,
+                left_start_key: vec![],
+                left_end_key: vec![],
+                right_start_key: vec![],
+                right_end_key: vec![],
+                error: e.to_string(),
+            })),
+        }
+    }
+
+    async fn report_region_stats(
+        &self,
+        request: Request<RegionStatsRequest>,
+    ) -> Result<Response<RegionStatsResponse>, Status> {
+        let req = request.into_inner();
+        let region = match self.node.router.get_region(req.region_id) {
+            Some(r) => r,
+            None => {
+                return Ok(Response::new(RegionStatsResponse {
+                    split_recommended: false,
+                    suggested_split_key: vec![],
+                }));
+            }
+        };
+
+        let (key_count, total_bytes) = self
+            .node
+            .storage
+            .calculate_region_stats(&region.start_key, &region.end_key)
+            .unwrap_or((0, 0));
+
+        let split_recommended = key_count >= 10000 || total_bytes >= 64 * 1024 * 1024;
+        let suggested_split_key = if split_recommended {
+            self.node
+                .storage
+                .find_median_key(&region.start_key, &region.end_key)
+                .unwrap_or(None)
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        Ok(Response::new(RegionStatsResponse {
+            split_recommended,
+            suggested_split_key,
+        }))
     }
 }
 
@@ -217,12 +391,12 @@ impl TxnService for TxnServiceImpl {
 
 // --- RAFT SERVICE ---
 pub struct RaftServiceImpl {
-    _node: NodeState,
+    node: NodeState,
 }
 
 impl RaftServiceImpl {
     pub fn new(node: NodeState) -> Self {
-        Self { _node: node }
+        Self { node }
     }
 }
 
@@ -230,8 +404,16 @@ impl RaftServiceImpl {
 impl RaftService for RaftServiceImpl {
     async fn send_message(
         &self,
-        _request: Request<RaftMessage>,
+        request: Request<RaftMessage>,
     ) -> Result<Response<RaftResponse>, Status> {
+        let msg = request.into_inner();
+        if let Ok(eraft_msg) = EraftMessage::parse_from_bytes(&msg.message_data) {
+            let mut nodes = self.node.raft_nodes.lock();
+            if let Some(raft_node) = nodes.get_mut(&msg.region_id) {
+                let _ = raft_node.step(eraft_msg);
+            }
+        }
+
         Ok(Response::new(RaftResponse {
             accepted: true,
             error: String::new(),
@@ -244,6 +426,26 @@ impl RaftService for RaftServiceImpl {
     ) -> Result<Response<SnapshotResponse>, Status> {
         Ok(Response::new(SnapshotResponse {
             success: true,
+            error: String::new(),
+        }))
+    }
+
+    async fn step(
+        &self,
+        request: Request<tonic::Streaming<RaftMessage>>,
+    ) -> Result<Response<RaftResponse>, Status> {
+        let mut stream = request.into_inner();
+        while let Ok(Some(msg)) = stream.message().await {
+            if let Ok(eraft_msg) = EraftMessage::parse_from_bytes(&msg.message_data) {
+                let mut nodes = self.node.raft_nodes.lock();
+                if let Some(raft_node) = nodes.get_mut(&msg.region_id) {
+                    let _ = raft_node.step(eraft_msg);
+                }
+            }
+        }
+
+        Ok(Response::new(RaftResponse {
+            accepted: true,
             error: String::new(),
         }))
     }

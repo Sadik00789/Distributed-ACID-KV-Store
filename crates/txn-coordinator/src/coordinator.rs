@@ -322,4 +322,107 @@ impl TransactionCoordinator {
 
         Ok(())
     }
+
+    /// Batch Prewrite: Executes MVCC prewrites for all mutations in a single Fjall transaction batch.
+    pub fn batch_prewrite(
+        &self,
+        start_ts: u64,
+        mutations: &[Mutation],
+        primary_key: &[u8],
+        lock_ttl: u64,
+    ) -> Result<(), TxnError> {
+        if mutations.is_empty() {
+            return Ok(());
+        }
+
+        let lock_p = self.engine.lock_partition();
+        let default_p = self.engine.default_partition();
+        let write_p = self.engine.write_partition();
+        let mut batch = self.engine.batch();
+
+        for mutation in mutations {
+            let key = mutation.key();
+
+            // 1. Check write conflict & permanent rollback record
+            let seek_key = KeyEncoder::encode(key, u64::MAX);
+            for item in write_p.range(seek_key..) {
+                let (enc_key, write_bytes) = item?;
+                let (curr_user_key, commit_ts) = KeyEncoder::decode(&enc_key)
+                    .map_err(|_| TxnError::Mvcc(MvccError::CorruptedState))?;
+
+                if curr_user_key == key {
+                    if let Some(rec) = WriteRecord::from_bytes(&write_bytes) {
+                        if rec.start_ts == start_ts && rec.op == OpType::Rollback {
+                            return Err(TxnError::TransactionRolledBack);
+                        }
+                    }
+                    if commit_ts >= start_ts {
+                        return Err(TxnError::WriteConflict(key.to_vec(), start_ts));
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            // 2. Check active lock and attempt resolution if needed
+            if let Some(existing_lock_bytes) = lock_p.get(key)? {
+                let lock = Lock::from_bytes(&existing_lock_bytes)
+                    .map_err(|_| TxnError::Mvcc(MvccError::CorruptedState))?;
+                if lock.start_ts != start_ts {
+                    if self.resolver.resolve_lock(key, &lock).is_err() {
+                        return Err(TxnError::KeyLocked(key.to_vec()));
+                    }
+                }
+            }
+
+            // 3. Stage value insert & lock registration into single batch
+            if let Mutation::Put { key, value } = mutation {
+                let data_key = KeyEncoder::encode(key, start_ts);
+                batch.insert(default_p, data_key, value.clone());
+            }
+
+            let lock = Lock {
+                primary_key: primary_key.to_vec(),
+                start_ts,
+                ttl: lock_ttl,
+                op: mutation.op_type(),
+            };
+            batch.insert(lock_p, key, lock.to_bytes());
+        }
+
+        self.engine.commit_batch(batch)?;
+        Ok(())
+    }
+
+    /// Batch Commit: Executes MVCC commit for primary & secondary keys in a single Fjall transaction batch.
+    pub fn batch_commit(
+        &self,
+        start_ts: u64,
+        commit_ts: u64,
+        keys: &[Vec<u8>],
+    ) -> Result<(), TxnError> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+
+        let lock_p = self.engine.lock_partition();
+        let write_p = self.engine.write_partition();
+        let mut batch = self.engine.batch();
+
+        for key in keys {
+            if let Some(lock_bytes) = lock_p.get(key)? {
+                let lock = Lock::from_bytes(&lock_bytes)
+                    .map_err(|_| TxnError::Mvcc(MvccError::CorruptedState))?;
+                if lock.start_ts == start_ts {
+                    let write_key = KeyEncoder::encode(key, commit_ts);
+                    let write_rec = WriteRecord::new(start_ts, lock.op);
+                    batch.insert(write_p, write_key, write_rec.to_bytes());
+                    batch.remove(lock_p, key);
+                }
+            }
+        }
+
+        self.engine.commit_batch(batch)?;
+        Ok(())
+    }
 }

@@ -5,23 +5,24 @@ A high-performance, fault-tolerant, horizontally scalable distributed key-value 
 
 ## Architecture Highlights
 
-- **Multi-Raft Consensus (`raft-engine`)**: Key-range sharded Multi-Raft implementation supporting dynamic region splits (at 64 MB thresholds), automatic leader election, snapshot transfers, and active load distribution across nodes.
-- **Percolator 2-Phase Commit (`txn-coordinator`)**: Decentralized 2PC implementation featuring primary & secondary lock resolution, Lock TTL Heartbeats, Conflict Detection via Hybrid Logical Clocks (HLC), write conflict rollbacks, permanent `Rollback` records, and automatic lock resolution for expired TTLs.
+- **Multi-Raft Consensus (`raft-engine`)**: Key-range sharded Multi-Raft implementation supporting Dynamic Region Range Splitting (at configurable 10,000 keys or 64MB thresholds), `SplitCmd` Raft log consensus, `RegionEpoch` tracking, automatic leader election, snapshot transfers, and active load distribution across nodes.
+- **Percolator 2-Phase Commit (`txn-coordinator`)**: Decentralized 2PC implementation featuring primary & secondary lock resolution, Lock TTL Heartbeats, Conflict Detection via Hybrid Logical Clocks (HLC), write conflict rollbacks, permanent `Rollback` records, and non-blocking Percolator lock resolution for expired TTLs.
+- **Asynchronous gRPC Request Batching & Pipelining (`client` & `node`)**: Thread-safe `BatchCollector` in client SDK buffering prewrite and commit mutations into high-throughput micro-batches (flushed every 2ms or 128 keys) over `BatchPrewrite` and `BatchCommit` gRPC RPCs, executed atomically in single Fjall database transaction batches on storage engine nodes.
+- **Full Multi-Raft gRPC Network Pipeline (`raft-engine` & `node`)**: Real streaming gRPC network transport over `RaftService::Step` and `SendMessage` with Fjall disk persistence for Raft `HardState`, `ConfState`, snapshots, and uncommitted log entries in background `RawNode::ready()` event processing loops.
 - **MVCC Storage Engine (`storage`)**: Partition-separated storage (`DEFAULT`, `LOCK`, `WRITE`) backed by Fjall engine with Multi-Version Concurrency Control timestamp encoding for lock-free point lookups, MVCC range scans, snapshot reads, and background MVCC Garbage Collection (`gc_keys_older_than`).
-- **gRPC Node Server (`node`) & Client SDK (`client`)**: High-throughput Tokio + Tonic gRPC execution node alongside a CLI client tool (`kv-cli`) with `get`, `put`, and `scan` support.
-- **Deterministic Fault Testing & Benchmarks (`simulation`)**: `madsim`-ready fault injection test suite verifying leader election, 2PC lock resolution, MVCC range scan correctness, and Criterion micro-benchmarks (`transaction_bench`).
+- **Jepsen-Style Chaos Fault-Injection Harness (`simulation`)**: Async `FaultyTransport` proxy layer capable of injecting network partitions (isolated leaders), mid-2PC node crashes, and 30% asymmetric packet loss, validated by `test_chaos_linearizability_under_partition` and `test_chaos_orphan_lock_cleanup_on_node_crash`.
 
 ## Workspace Crate Structure
 
 ```
 crates/
-├── proto/           # Protobuf compilation & gRPC modules
-├── storage/         # Fjall storage engine, MVCC timestamp encoding & GC
-├── raft-engine/     # Multi-Raft consensus engine & range router
-├── txn-coordinator/ # Percolator 2PC engine, HLC & lock resolver
-├── node/            # Server binary execution engine & Tokio gRPC server
-├── client/          # Client SDK & kv-cli binary
-└── simulation/      # Deterministic fault simulation & Criterion benchmarks
+├── proto/           # Protobuf compilation, KvService, TxnService & RaftService gRPC definitions
+├── storage/         # Fjall storage engine, MVCC timestamp encoding, GC & median split key finder
+├── raft-engine/     # Multi-Raft consensus engine, RaftStorage persistence, RaftCmd & RegionRouter
+├── txn-coordinator/ # Percolator 2PC engine, HLC, lock resolver & atomic Fjall batch execution
+├── node/            # Node server engine, Tokio gRPC services & background Raft ready processing loops
+├── client/          # Client SDK, BatchCollector & kv-cli binary
+└── simulation/      # Jepsen-style chaos fault injection, unit/integration tests & Criterion micro-benchmarks
 ```
 
 ## Quick Start

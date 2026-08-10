@@ -4,6 +4,7 @@ package raft;
 service RaftService {
   rpc SendMessage (RaftMessage) returns (RaftResponse);
   rpc StreamSnapshot (stream SnapshotChunk) returns (SnapshotResponse);
+  rpc Step (stream RaftMessage) returns (RaftResponse);
 }
 
 message RaftMessage {

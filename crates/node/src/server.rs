@@ -1,6 +1,9 @@
+use parking_lot::Mutex;
 use raft_engine::{MultiRaftNode, RaftConfig, Region, RegionRouter};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use storage::{StorageConfig, StorageEngine};
 use txn_coordinator::{HybridLogicalClock, TransactionCoordinator};
@@ -35,6 +38,8 @@ pub struct NodeState {
     pub hlc: HybridLogicalClock,
     pub coordinator: Arc<TransactionCoordinator>,
     pub router: RegionRouter,
+    pub raft_nodes: Arc<Mutex<HashMap<u64, MultiRaftNode>>>,
+    pub next_region_id: Arc<AtomicU64>,
 }
 
 impl NodeState {
@@ -44,19 +49,22 @@ impl NodeState {
         let coordinator = Arc::new(TransactionCoordinator::new(storage.clone(), hlc.clone()));
         let router = RegionRouter::new();
 
-        router.insert_region(Region {
-            id: 1,
-            start_key: vec![],
-            end_key: vec![],
-            peers: vec![config.node_id],
-        });
+        router.insert_region(Region::new(
+            1,
+            vec![],
+            vec![],
+            vec![config.node_id],
+        ));
 
         let raft_cfg = RaftConfig {
             node_id: config.node_id,
             ..Default::default()
         };
-        let _raft_node = MultiRaftNode::new(1, vec![config.node_id], &raft_cfg, storage.clone())
+        let raft_node = MultiRaftNode::new(1, vec![config.node_id], &raft_cfg, storage.clone())
             .expect("Failed to initialize Raft node");
+
+        let mut map = HashMap::new();
+        map.insert(1, raft_node);
 
         Ok(Self {
             config,
@@ -64,6 +72,12 @@ impl NodeState {
             hlc,
             coordinator,
             router,
+            raft_nodes: Arc::new(Mutex::new(map)),
+            next_region_id: Arc::new(AtomicU64::new(2)),
         })
+    }
+
+    pub fn alloc_region_id(&self) -> u64 {
+        self.next_region_id.fetch_add(1, Ordering::SeqCst)
     }
 }

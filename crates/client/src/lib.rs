@@ -1,3 +1,3 @@
 pub mod client;
 
-pub use client::{ClientError, KvClient};
+pub use client::{BatchCollector, ClientError, KvClient};

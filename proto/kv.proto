@@ -1,10 +1,16 @@
 syntax = "proto3";
 package kv;
 
+import "txn.proto";
+
 service KvService {
   rpc Get (GetRequest) returns (GetResponse);
   rpc Scan (ScanRequest) returns (ScanResponse);
   rpc ExecuteTxn (TxnRequest) returns (TxnResponse);
+  rpc BatchPrewrite (BatchPrewriteRequest) returns (BatchPrewriteResponse);
+  rpc BatchCommit (BatchCommitRequest) returns (BatchCommitResponse);
+  rpc AskSplit (AskSplitRequest) returns (AskSplitResponse);
+  rpc ReportRegionStats (RegionStatsRequest) returns (RegionStatsResponse);
 }
 
 message GetRequest {
@@ -55,4 +61,50 @@ message TxnRequest {
 message TxnResponse {
   bool success = 1;
   string error = 2;
+}
+
+message BatchPrewriteRequest {
+  uint64 start_ts = 1;
+  bytes primary_lock = 2;
+  uint64 lock_ttl = 3;
+  repeated Mutation mutations = 4;
+}
+
+message BatchPrewriteResponse {
+  repeated txn.KeyError errors = 1;
+}
+
+message BatchCommitRequest {
+  uint64 start_ts = 1;
+  uint64 commit_ts = 2;
+  repeated bytes keys = 3;
+}
+
+message BatchCommitResponse {
+  txn.KeyError error = 1;
+}
+
+message AskSplitRequest {
+  uint64 region_id = 1;
+  bytes split_key = 2;
+}
+
+message AskSplitResponse {
+  uint64 new_region_id = 1;
+  bytes left_start_key = 2;
+  bytes left_end_key = 3;
+  bytes right_start_key = 4;
+  bytes right_end_key = 5;
+  string error = 6;
+}
+
+message RegionStatsRequest {
+  uint64 region_id = 1;
+  uint64 key_count = 2;
+  uint64 bytes_written = 3;
+}
+
+message RegionStatsResponse {
+  bool split_recommended = 1;
+  bytes suggested_split_key = 2;
 }

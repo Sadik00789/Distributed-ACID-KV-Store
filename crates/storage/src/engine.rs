@@ -122,4 +122,87 @@ impl StorageEngine {
 
         Ok(gc_count)
     }
+
+    /// Scans distinct user keys in range [start_key, end_key).
+    pub fn get_keys_in_range(
+        &self,
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        let mut keys = Vec::new();
+        let mut last_seen: Option<Vec<u8>> = None;
+
+        for item in self.p_write.iter() {
+            let (enc_key, _) = item?;
+            let (user_key, _) = match KeyEncoder::decode(&enc_key) {
+                Ok(res) => res,
+                Err(_) => continue,
+            };
+
+            if !start_key.is_empty() && user_key < start_key {
+                continue;
+            }
+            if !end_key.is_empty() && user_key >= end_key {
+                continue;
+            }
+
+            if last_seen.as_deref() != Some(user_key) {
+                last_seen = Some(user_key.to_vec());
+                keys.push(user_key.to_vec());
+            }
+        }
+
+        keys.sort();
+        keys.dedup();
+        Ok(keys)
+    }
+
+    /// Computes key count and total byte size for keys in [start_key, end_key).
+    pub fn calculate_region_stats(
+        &self,
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> Result<(u64, u64), StorageError> {
+        let mut key_count = 0u64;
+        let mut total_bytes = 0u64;
+        let mut last_seen: Option<Vec<u8>> = None;
+
+        for item in self.p_write.iter() {
+            let (enc_key, val_bytes) = item?;
+            let (user_key, _) = match KeyEncoder::decode(&enc_key) {
+                Ok(res) => res,
+                Err(_) => continue,
+            };
+
+            if !start_key.is_empty() && user_key < start_key {
+                continue;
+            }
+            if !end_key.is_empty() && user_key >= end_key {
+                continue;
+            }
+
+            if last_seen.as_deref() != Some(user_key) {
+                last_seen = Some(user_key.to_vec());
+                key_count += 1;
+            }
+            total_bytes += enc_key.len() as u64 + val_bytes.len() as u64;
+        }
+
+        Ok((key_count, total_bytes))
+    }
+
+    /// Finds the median key K_split in range [start_key, end_key).
+    pub fn find_median_key(
+        &self,
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let keys = self.get_keys_in_range(start_key, end_key)?;
+        if keys.len() < 2 {
+            Ok(None)
+        } else {
+            let mid = keys.len() / 2;
+            Ok(Some(keys[mid].clone()))
+        }
+    }
 }
